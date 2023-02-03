@@ -1,5 +1,14 @@
-Code journal for [CPI NAT HAND](https://github.com/solana-developers/program-examples/blob/main/basics/cross-program-invocation/native/programs/hand/src/lib.rs)
+## Code journal for [CPI NAT HAND](https://github.com/solana-developers/program-examples/blob/main/basics/cross-program-invocation/native/programs/hand/src/lib.rs) <br> <br>
 
+### What are the concepts (borrowing, ownership, vectors etc)?
+The concepts utilized in the code are borsh structs, iterators, vectors, next_account_info convience function, heavy utilization of the built in ProgramError's that the solana_program program_error::ProgramError provides.   <br> <br>
+
+### What is the contract doing? What is the mechanism? 
+The program is invoking instructions of a different on-chain program <br> <br>
+
+<br>
+------
+<br>
 
 ```rust
 // Binary Object Representation Serializer for Hashing
@@ -22,7 +31,7 @@ fn pull_lever(
     accounts: &[AccountInfo],
     instruction_data: &[u8]
 ) -> ProgramResult {
-    let accounts_iter = &mut accounts.iter(); // return iterator of 'accounts' (2)
+    let accounts_iter = &mut accounts.iter(); // return iterator of 'accounts' AccountInfo struct  (2)
     let power = next_account_info(accounts_iter)?; // parse out 'power' account
     let lever_program = next_account_info(accounts_iter)?; // parse out 'lever_program' account
 
@@ -40,3 +49,4 @@ fn pull_lever(
     invoke(&ix, &[power.clone()])
 }
 ```
+
