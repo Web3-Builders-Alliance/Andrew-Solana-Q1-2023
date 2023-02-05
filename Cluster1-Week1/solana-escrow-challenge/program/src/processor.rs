@@ -39,6 +39,14 @@ impl Processor {
                 msg!("Instruction: Exchange");
                 Self::process_exchange(accounts, amount, program_id)
             }
+            EscrowInstruction::Cancel {} => {
+                msg!("Escrow has been cancelled");
+                Self::process_cancel(accounts, program_id)
+            }
+            EscrowInstruction::ResetTimeLock { amount } => {
+                msg!("Resetting the timelock");
+                Self::process_reset_time_lock(accounts, amount, program_id)
+            }
         }
     }
 
@@ -135,7 +143,6 @@ impl Processor {
 
         let escrow_info = Escrow::unpack(&escrow_account.try_borrow_data()?)?;
 
-        // -When the Exchange Instruction is called make sure the current slot is greater than the unlock_time but less than the time_out.
         let current_slot = Clock::get()?.slot;
         if current_slot < escrow_info.unlock_time && current_slot > escrow_info.time_out {
             return Err(EscrowError::EscrowTimeout.into());
@@ -222,9 +229,120 @@ impl Processor {
         **initializers_main_account.try_borrow_mut_lamports()? = initializers_main_account
             .lamports()
             .checked_add(escrow_account.lamports())
-            .ok_or(EscrowError::AmountOverflow)?;
+            .ok_or(EscrowError::AmountOverflow.into());
         **escrow_account.try_borrow_mut_lamports()? = 0;
         *escrow_account.try_borrow_mut_data()? = &mut [];
+
+        Ok(())
+    }
+
+    fn process_cancel(accounts: &[AccountInfo], program_id: &Pubkey) -> ProgramResult {
+        let account_info_iter = &mut accounts.iter();
+        let initializer = next_account_info(account_info_iter)?;
+        let initializers_main_account = next_account_info(account_info_iter)?;
+        let escrow_account = next_account_info(account_info_iter)?;
+        let token_program = next_account_info(account_info_iter)?;
+        let pdas_temp_token_account = next_account_info(account_info_iter)?;
+        let pda_account = next_account_info(account_info_iter)?;
+
+        if !initializer.is_signer {
+            return Err(ProgramError::MissingRequiredSignature);
+        }
+
+        let (pda, nonce) = Pubkey::find_program_address(&[b"escrow"], program_id);
+
+        let close_pdas_temp_acc_ix = spl_token::instruction::close_account(
+            token_program.key,
+            pdas_temp_token_account.key,
+            initializers_main_account.key,
+            &pda,
+            &[&pda]
+        )?;
+
+        msg!("Close escrow account");
+        **initializers_main_account.lamports.borrow_mut() = initializers_main_account
+            .lamports()
+            .checked_add(escrow_account.lamports())
+            .ok_or(EscrowError::AmountOverflow.into())?;
+        **escrow_account.lamports.borrow_mut() = 0;
+        *escrow_account.try_borrow_mut_data()? = &mut [];
+
+        msg!("close pda's temp account");
+        invoke_signed(
+            &close_pdas_temp_acc_ix,
+            &[
+                pdas_temp_token_account.clone(),
+                initializers_main_account.clone(),
+                pda_account.clone(),
+                token_program.clone(),
+            ],
+            &[&[&b"escrow"[..], &[nonce]]]
+        )?;
+
+        Ok(())
+    }
+
+    fn process_reset_time_lock(
+        accounts: &[AccountInfo],
+        amount: u64,
+        program_id: &Pubkey
+    ) -> ProgramResult {
+        let unlock_time = Clock::get()?.slot;
+        let escrow_info = unlock_time;
+
+        let account_info_iter = &mut accounts.iter();
+        let initializer = next_account_info(account_info_iter)?;
+
+        if !initializer.is_signer {
+            return Err(ProgramError::MissingRequiredSignature);
+        }
+
+        let temp_token_account = next_account_info(account_info_iter)?;
+
+        let token_to_receive_account = next_account_info(account_info_iter)?;
+        if *token_to_receive_account.owner != spl_token::id() {
+            return Err(ProgramError::IncorrectProgramId);
+        }
+
+        let escrow_account = next_account_info(account_info_iter)?;
+        let rent = &Rent::from_account_info(next_account_info(account_info_iter)?)?;
+
+        if !rent.is_exempt(escrow_account.lamports(), escrow_account.data_len()) {
+            return Err(EscrowError::NotRentExempt.into());
+        }
+
+        let mut escrow_info = Escrow::unpack_unchecked(&escrow_account.try_borrow_data()?)?;
+        if escrow_info.is_initialized() {
+            return Err(ProgramError::AccountAlreadyInitialized);
+        }
+
+        escrow_info.is_initialized = true;
+        escrow_info.initializer_pubkey = *initializer.key;
+        escrow_info.temp_token_account_pubkey = *temp_token_account.key;
+        escrow_info.initializer_token_to_receive_account_pubkey = *token_to_receive_account.key;
+        escrow_info.expected_amount = amount;
+        escrow_info.time_out = time_out;
+        escrow_info.unlock_time = unlock_time;
+
+        Escrow::pack(escrow_info, &mut escrow_account.try_borrow_mut_data()?)?;
+
+        let (pda, nonce) = Pubkey::find_program_address(&[b"escrow"], program_id);
+
+        let token_program = next_account_info(account_info_iter)?;
+        let owner_change_ix = spl_token::instruction::set_authority(
+            token_program.key,
+            temp_token_account.key,
+            Some(&pda),
+            spl_token::instruction::AuthorityType::AccountOwner,
+            initializer.key,
+            &[&initializer.key]
+        )?;
+
+        msg!("transfer token account ownership with token program");
+        invoke(
+            &owner_change_ix,
+            &[temp_token_account.clone(), initializer.clone(), token_program.clone()]
+        )?;
 
         Ok(())
     }
